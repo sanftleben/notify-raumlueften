@@ -8,6 +8,10 @@ Home Assistant Blueprint für Lüftungshinweise anhand der Luftfeuchtigkeit.
 - Konfigurierbarer Luftfeuchtigkeits-Grenzwert
 - Konfigurierbare Mindestdauer über dem Grenzwert, um kurze Messwertspitzen zu ignorieren
 - Hysterese gegen Benachrichtigungs-Spam bei Werten rund um den Grenzwert
+- Optionale Berücksichtigung von Außentemperatur und Außenluftfeuchte
+- Lüftungsempfehlung nur, wenn die Außenluft tatsächlich trockener ist als die Raumluft
+- Konfigurierbare Mindest-Außentemperatur als Frost- und Komfortgrenze
+- Automatisches Nachholen der Empfehlung, sobald sich die Außenbedingungen bessern
 - Berücksichtigung von Tür- und Fenstersensoren
 - Keine Lüftungsempfehlung, wenn bereits ein Fenster oder eine Tür geöffnet ist
 - Optionaler Hinweis, dass bereits gelüftet wird
@@ -65,6 +69,56 @@ Bei einem Grenzwert von 60 % und einer Hysterese von 3 % gilt:
 
 Dadurch wird verhindert, dass die Automation bei Messwerten wie `59 → 60 → 59 → 60 %` ständig zwischen den Zuständen wechselt.
 
+### Außenbedingungen
+
+Optional können ein Sensor für die Außentemperatur und ein Sensor für die Außenluftfeuchte ausgewählt werden. Sind beide gesetzt, wird eine Lüftungsempfehlung nur noch dann ausgesprochen, wenn Lüften physikalisch überhaupt etwas bringt.
+
+Bleibt eines der beiden Felder leer oder liefert ein Sensor keinen gültigen Wert, verhält sich der Blueprint wie bisher und benachrichtigt ohne Prüfung der Außenbedingungen.
+
+#### Warum nicht einfach die relative Luftfeuchtigkeit vergleichen?
+
+Die relative Luftfeuchtigkeit sagt für sich genommen nichts darüber aus, wie viel Wasser die Luft tatsächlich enthält. Kalte Luft mit 95 % relativer Feuchte ist deutlich trockener als warme Luft mit 65 %.
+
+Deshalb wird aus Temperatur und relativer Luftfeuchtigkeit die absolute Luftfeuchtigkeit in Gramm Wasser pro Kubikmeter berechnet — innen wie außen:
+
+```text
+innen   22 °C / 65 %  ->  12,6 g/m³
+außen    8 °C / 95 %  ->   7,9 g/m³
+```
+
+Obwohl es draußen mit 95 % nach „sehr feucht" aussieht, wird beim Lüften Feuchtigkeit abtransportiert. Umgekehrt gilt:
+
+```text
+innen   22 °C / 65 %  ->  12,6 g/m³
+außen   25 °C / 85 %  ->  19,6 g/m³
+```
+
+Hier würde Lüften die Feuchtigkeit im Raum sogar erhöhen. In diesem Fall wird keine Empfehlung gesendet.
+
+#### Innentemperatur
+
+Für die Berechnung wird die Raumtemperatur benötigt. Optional kann dafür ein Innentemperatursensor ausgewählt werden.
+
+Ohne Sensor wird der Wert „Angenommene Innentemperatur" benutzt, standardmäßig 21 °C. Ein echter Sensor ist besonders in Räumen mit stark schwankender Temperatur sinnvoll, zum Beispiel im Bad nach dem Duschen.
+
+#### Mindestunterschied absolute Luftfeuchtigkeit
+
+Standardmäßig 1,0 g/m³.
+
+Um so viel muss die Außenluft trockener sein als die Raumluft, damit gelüftet werden soll. Kleinere Werte machen die Empfehlung empfindlicher, größere zurückhaltender.
+
+#### Mindest-Außentemperatur
+
+Standardmäßig 0 °C.
+
+Unterhalb dieser Temperatur wird nicht zum Lüften aufgefordert, auch wenn die Außenluft trockener wäre. Damit lassen sich Frost und unangenehme Auskühlung ausschließen.
+
+#### Nachholen bei besserem Wetter
+
+Ist die Luftfeuchtigkeit im Raum dauerhaft zu hoch und das Wetter zunächst ungeeignet, wird zunächst nichts gesendet.
+
+Sobald die Außenbedingungen für die konfigurierte Mindestdauer passen und die Luftfeuchtigkeit weiterhin über dem Grenzwert liegt, wird die Empfehlung nachträglich ausgelöst.
+
 ### Tür- und Fenstersensoren
 
 Alle ausgewählten Tür- und Fenstersensoren werden gemeinsam betrachtet.
@@ -91,19 +145,24 @@ Mehrere Ziele können gleichzeitig ausgewählt werden.
 ```text
                  Luftfeuchtigkeit > Grenzwert
                               │
-                     Mindestdauer erreicht?
+                     Außenluft trockener?
+                     (und nicht zu kalt)
                          /            \
                        nein            ja
                         │              │
-                        │       Fenster/Tür offen?
+                        │      Mindestdauer erreicht?
                         │          /          \
-                        │        ja            nein
-                        │        │               │
-                        │        │        Benachrichtigung
-                        │        │               │
-                        │        └── Lüften ─────┘
-                        │
-                        └──────── warten
+                        │        nein          ja
+                        │         │             │
+                        │         │      Fenster/Tür offen?
+                        │         │        /          \
+                        │         │      ja            nein
+                        │         │      │               │
+                        │         │      │        Benachrichtigung
+                        │         │      │               │
+                        │         │      └── Lüften ─────┘
+                        │         │
+                        └─────────┴──────── warten
 
 Fenster/Tür wird geschlossen
               │
@@ -113,10 +172,19 @@ Fenster/Tür wird geschlossen
         ja             nein
         │                │
         ▼                ▼
-   erneut melden       nichts
+  Außenluft noch      nichts
+   geeignet?
+   /        \
+  ja         nein
+  │            │
+  ▼            ▼
+erneut       nichts
+melden
 ```
 
 Die Entwarnung verwendet die Hysterese. Bei 60 % Grenzwert und 3 % Hysterese wird erst unter 57 % eine Normalmeldung ausgelöst.
+
+Die Prüfung der Außenbedingungen gilt nur für die eigentlichen Lüftungsempfehlungen. Die Entwarnung und der Hinweis „es wird bereits gelüftet" sind Statusmeldungen und werden davon nicht unterdrückt.
 
 ## Beispiel
 
@@ -126,19 +194,25 @@ Konfiguration:
 - Luftfeuchtigkeit: 60 %
 - Mindestdauer: 5 Minuten
 - Hysterese: 3 %
+- Innentemperatur: Sensor Schlafzimmer
+- Außentemperatur: Sensor Garten
+- Außenluftfeuchte: Sensor Garten
+- Mindestunterschied: 1,0 g/m³
+- Mindest-Außentemperatur: 0 °C
 - Fensterkontakt: Schlafzimmerfenster
 - Benachrichtigung: Telegram
 
 Ablauf:
 
-1. Luftfeuchtigkeit steigt auf 61 %.
-2. Nach fünf Minuten wird geprüft, ob der Wert weiterhin über 60 % liegt.
-3. Ist das Fenster geschlossen, wird eine Telegram-Nachricht gesendet.
-4. Das Fenster wird geöffnet.
-5. Es wird keine weitere normale Lüftungsaufforderung gesendet.
-6. Das Fenster wird geschlossen.
-7. Liegt die Luftfeuchtigkeit noch über 60 %, wird erneut zum Lüften aufgefordert.
-8. Sinkt sie anschließend unter 57 %, ist der Zustand wieder normal.
+1. Luftfeuchtigkeit steigt auf 61 % bei 22 °C Raumtemperatur.
+2. Draußen sind es 25 °C bei 85 %. Die Außenluft ist feuchter als die Raumluft, es wird nichts gesendet.
+3. Am Abend kühlt es auf 12 °C bei 80 % ab. Die Außenluft ist jetzt deutlich trockener.
+4. Nach fünf Minuten unter diesen Bedingungen wird eine Telegram-Nachricht gesendet.
+5. Das Fenster wird geöffnet.
+6. Es wird keine weitere normale Lüftungsaufforderung gesendet.
+7. Das Fenster wird geschlossen.
+8. Liegt die Luftfeuchtigkeit noch über 60 % und ist die Außenluft weiterhin geeignet, wird erneut zum Lüften aufgefordert.
+9. Sinkt sie anschließend unter 57 %, ist der Zustand wieder normal.
 
 ## Hinweis zu mehreren Sensoren
 

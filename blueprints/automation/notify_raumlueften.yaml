@@ -2,11 +2,13 @@ blueprint:
   name: Raum lüften bei hoher Luftfeuchtigkeit
   description: >
     Sendet eine Benachrichtigung, wenn die Luftfeuchtigkeit eines oder mehrerer
-    Sensoren den Grenzwert für eine definierte Zeit überschreitet. Tür- und
-    Fenstersensoren werden berücksichtigt: Ist bereits ein Fenster oder eine
-    Tür geöffnet, wird keine zusätzliche Lüftungsempfehlung gesendet. Wird
-    nach dem Lüften wieder geschlossen und die Luftfeuchtigkeit ist weiterhin
-    zu hoch, kann erneut benachrichtigt werden.
+    Sensoren den Grenzwert für eine definierte Zeit überschreitet. Optional
+    werden Außentemperatur und Außenluftfeuchte berücksichtigt: Die Empfehlung
+    wird nur ausgesprochen, wenn die Außenluft tatsächlich trockener ist als die
+    Raumluft. Tür- und Fenstersensoren werden berücksichtigt: Ist bereits ein
+    Fenster oder eine Tür geöffnet, wird keine zusätzliche Lüftungsempfehlung
+    gesendet. Wird nach dem Lüften wieder geschlossen und die Luftfeuchtigkeit
+    ist weiterhin zu hoch, kann erneut benachrichtigt werden.
   domain: automation
   author: sanftleben
 
@@ -56,6 +58,83 @@ blueprint:
           max: 20
           step: 1
           unit_of_measurement: "%"
+          mode: slider
+
+    outdoor_temperature_sensor:
+      name: Außentemperatursensor
+      description: >
+        Optional. Wird zusammen mit der Außenluftfeuchte benutzt, um zu
+        berechnen, ob die Außenluft trockener ist als die Raumluft. Bleibt das
+        Feld leer, wird ohne Prüfung der Außenbedingungen benachrichtigt.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    outdoor_humidity_sensor:
+      name: Außenluftfeuchtesensor
+      description: >
+        Optional. Relative Luftfeuchtigkeit draußen. Bleibt das Feld leer, wird
+        ohne Prüfung der Außenbedingungen benachrichtigt.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+
+    indoor_temperature_sensor:
+      name: Innentemperatursensor
+      description: >
+        Optional. Wird für die Berechnung der absoluten Luftfeuchtigkeit im Raum
+        benutzt. Ohne Sensor wird die angenommene Innentemperatur verwendet.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    assumed_indoor_temperature:
+      name: Angenommene Innentemperatur
+      description: >
+        Wird nur benutzt, wenn kein Innentemperatursensor ausgewählt ist oder
+        dieser keinen gültigen Wert liefert.
+      default: 21
+      selector:
+        number:
+          min: 5
+          max: 35
+          step: 0.5
+          unit_of_measurement: "°C"
+          mode: slider
+
+    min_absolute_humidity_difference:
+      name: Mindestunterschied absolute Luftfeuchtigkeit
+      description: >
+        Um so viel Gramm Wasser pro Kubikmeter muss die Außenluft trockener sein
+        als die Raumluft, damit Lüften empfohlen wird. Kleine Werte machen die
+        Empfehlung empfindlicher, große Werte zurückhaltender.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.1
+          unit_of_measurement: "g/m³"
+          mode: slider
+
+    min_outdoor_temperature:
+      name: Mindest-Außentemperatur
+      description: >
+        Unterhalb dieser Außentemperatur wird nicht zum Lüften aufgefordert,
+        auch wenn die Außenluft trockener wäre. Frost- und Komfortgrenze.
+      default: 0
+      selector:
+        number:
+          min: -20
+          max: 20
+          step: 1
+          unit_of_measurement: "°C"
           mode: slider
 
     opening_sensors:
@@ -119,15 +198,23 @@ blueprint:
 mode: queued
 max: 10
 
-trigger:
-  - platform: numeric_state
-    entity_id: !input humidity_sensors
-    above: !input humidity_threshold
-    for: !input minimum_duration
-    id: humidity_high
+# Werte aus `variables` stehen in Trigger-Templates nicht zur Verfügung.
+# Alles, was ein Trigger-Template braucht, muss deshalb hier stehen.
+trigger_variables:
+  humidity_sensors: !input humidity_sensors
+  humidity_threshold: !input humidity_threshold
+  humidity_hysteresis: !input humidity_hysteresis
+  outdoor_temperature_sensor: !input outdoor_temperature_sensor
+  outdoor_humidity_sensor: !input outdoor_humidity_sensor
+  indoor_temperature_sensor: !input indoor_temperature_sensor
+  assumed_indoor_temperature: !input assumed_indoor_temperature
+  min_absolute_humidity_difference: !input min_absolute_humidity_difference
+  min_outdoor_temperature: !input min_outdoor_temperature
 
-  # Numeric-state triggers require a literal float for `below`. Therefore the
-  # hysteresis threshold is evaluated with a template trigger instead.
+trigger:
+  # Numeric-state triggers require a literal float for `above`/`below`, and the
+  # outside conditions cannot be expressed numerically at all. Both humidity
+  # thresholds are therefore evaluated with template triggers.
   - platform: template
     value_template: >-
       {% set values = namespace(items=[]) %}
@@ -137,7 +224,51 @@ trigger:
           {% set values.items = values.items + [value] %}
         {% endif %}
       {% endfor %}
-      {{ values.items | length > 0 and (values.items | max) < ((humidity_threshold | float(0)) - (humidity_hysteresis | float(0))) }}
+      {{ values.items | count > 0 and (values.items | max) > (humidity_threshold | float(0)) }}
+    for: !input minimum_duration
+    id: humidity_high
+
+  # Fires when the humidity is too high *and* the outside air is dry enough.
+  # Because template triggers are edge triggered, this also fires when the
+  # humidity has been high for a while and only the weather has improved.
+  - platform: template
+    value_template: >-
+      {% set values = namespace(items=[]) %}
+      {% for sensor in humidity_sensors %}
+        {% set value = states(sensor) | float(none) %}
+        {% if value is not none %}
+          {% set values.items = values.items + [value] %}
+        {% endif %}
+      {% endfor %}
+      {% set indoor_humidity = (values.items | max) if values.items | count > 0 else none %}
+      {% set outdoor_temp = (states(outdoor_temperature_sensor) | float(none)) if outdoor_temperature_sensor else none %}
+      {% set outdoor_humidity = (states(outdoor_humidity_sensor) | float(none)) if outdoor_humidity_sensor else none %}
+      {% set measured_indoor_temp = (states(indoor_temperature_sensor) | float(none)) if indoor_temperature_sensor else none %}
+      {% set indoor_temp = measured_indoor_temp if measured_indoor_temp is not none else (assumed_indoor_temperature | float(21)) %}
+      {% if indoor_humidity is none %}
+        {{ false }}
+      {% elif indoor_humidity <= (humidity_threshold | float(0)) %}
+        {{ false }}
+      {% elif outdoor_temp is none or outdoor_humidity is none %}
+        {{ true }}
+      {% else %}
+        {% set ah_out = 6.112 * (e ** (17.67 * outdoor_temp / (outdoor_temp + 243.5))) * outdoor_humidity * 2.1674 / (273.15 + outdoor_temp) %}
+        {% set ah_in = 6.112 * (e ** (17.67 * indoor_temp / (indoor_temp + 243.5))) * indoor_humidity * 2.1674 / (273.15 + indoor_temp) %}
+        {{ ah_out <= ah_in - (min_absolute_humidity_difference | float(0)) and outdoor_temp >= (min_outdoor_temperature | float(0)) }}
+      {% endif %}
+    for: !input minimum_duration
+    id: ventilation_possible
+
+  - platform: template
+    value_template: >-
+      {% set values = namespace(items=[]) %}
+      {% for sensor in humidity_sensors %}
+        {% set value = states(sensor) | float(none) %}
+        {% if value is not none %}
+          {% set values.items = values.items + [value] %}
+        {% endif %}
+      {% endfor %}
+      {{ values.items | count > 0 and (values.items | max) < ((humidity_threshold | float(0)) - (humidity_hysteresis | float(0))) }}
     for: !input minimum_duration
     id: humidity_normal
 
@@ -156,6 +287,12 @@ variables:
   opening_sensors: !input opening_sensors
   humidity_threshold: !input humidity_threshold
   humidity_hysteresis: !input humidity_hysteresis
+  outdoor_temperature_sensor: !input outdoor_temperature_sensor
+  outdoor_humidity_sensor: !input outdoor_humidity_sensor
+  indoor_temperature_sensor: !input indoor_temperature_sensor
+  assumed_indoor_temperature: !input assumed_indoor_temperature
+  min_absolute_humidity_difference: !input min_absolute_humidity_difference
+  min_outdoor_temperature: !input min_outdoor_temperature
   room_name: !input room_name
   notify_when_ventilating: !input notify_when_ventilating
   notify_when_closing: !input notify_when_closing
@@ -172,7 +309,22 @@ variables:
     {{ values.items }}
 
   max_humidity: >-
-    {{ humidity_values | max | default(0) }}
+    {{ (humidity_values | max) if humidity_values | count > 0 else 0 }}
+
+  # True when no usable outside readings are configured, so the blueprint keeps
+  # working like before when the optional sensors are left empty or fail.
+  ventilation_useful: >-
+    {% set outdoor_temp = (states(outdoor_temperature_sensor) | float(none)) if outdoor_temperature_sensor else none %}
+    {% set outdoor_humidity = (states(outdoor_humidity_sensor) | float(none)) if outdoor_humidity_sensor else none %}
+    {% set measured_indoor_temp = (states(indoor_temperature_sensor) | float(none)) if indoor_temperature_sensor else none %}
+    {% set indoor_temp = measured_indoor_temp if measured_indoor_temp is not none else (assumed_indoor_temperature | float(21)) %}
+    {% if outdoor_temp is none or outdoor_humidity is none or humidity_values | count == 0 %}
+      {{ true }}
+    {% else %}
+      {% set ah_out = 6.112 * (e ** (17.67 * outdoor_temp / (outdoor_temp + 243.5))) * outdoor_humidity * 2.1674 / (273.15 + outdoor_temp) %}
+      {% set ah_in = 6.112 * (e ** (17.67 * indoor_temp / (indoor_temp + 243.5))) * max_humidity * 2.1674 / (273.15 + indoor_temp) %}
+      {{ ah_out <= ah_in - (min_absolute_humidity_difference | float(0)) and outdoor_temp >= (min_outdoor_temperature | float(0)) }}
+    {% endif %}
 
   anything_open: >-
     {{ opening_sensors | select('is_state', 'on') | list | count > 0 }}
@@ -183,7 +335,7 @@ action:
   - choose:
       - conditions:
           - condition: trigger
-            id: humidity_high
+            id: ventilation_possible
           - condition: template
             value_template: "{{ not anything_open }}"
         sequence:
@@ -239,6 +391,8 @@ action:
             value_template: "{{ not anything_open }}"
           - condition: template
             value_template: "{{ max_humidity > (humidity_threshold | float(0)) }}"
+          - condition: template
+            value_template: "{{ ventilation_useful }}"
           - condition: template
             value_template: "{{ notify_when_closing }}"
         sequence:
