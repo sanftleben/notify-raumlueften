@@ -96,7 +96,7 @@ blueprint:
         Tür geöffnet wird und die Luftfeuchtigkeit weiterhin hoch ist.
       default: false
       selector:
-        boolean:
+        boolean: {}
 
     notify_when_closing:
       name: Nach dem Schließen erneut benachrichtigen
@@ -105,7 +105,7 @@ blueprint:
         wird erneut zum Lüften aufgefordert.
       default: true
       selector:
-        boolean
+        boolean: {}
 
     notify_when_normal:
       name: Entwarnung senden
@@ -114,7 +114,7 @@ blueprint:
         Grenzwert minus Hysterese fällt.
       default: false
       selector:
-        boolean
+        boolean: {}
 
 mode: queued
 max: 10
