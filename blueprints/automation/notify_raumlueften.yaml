@@ -1,0 +1,261 @@
+blueprint:
+  name: Raum lüften bei hoher Luftfeuchtigkeit
+  description: >
+    Sendet eine Benachrichtigung, wenn die Luftfeuchtigkeit eines oder mehrerer
+    Sensoren den Grenzwert für eine definierte Zeit überschreitet. Tür- und
+    Fenstersensoren werden berücksichtigt: Ist bereits ein Fenster oder eine
+    Tür geöffnet, wird keine zusätzliche Lüftungsempfehlung gesendet. Wird
+    nach dem Lüften wieder geschlossen und die Luftfeuchtigkeit ist weiterhin
+    zu hoch, kann erneut benachrichtigt werden.
+  domain: automation
+  author: sanftleben
+
+  input:
+    humidity_sensors:
+      name: Luftfeuchtigkeitssensoren
+      description: Sensoren für die relative Luftfeuchtigkeit.
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+          multiple: true
+
+    humidity_threshold:
+      name: Luftfeuchtigkeit Grenzwert
+      description: Ab dieser relativen Luftfeuchtigkeit soll gelüftet werden.
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    minimum_duration:
+      name: Mindestdauer über Grenzwert
+      description: >
+        Die Luftfeuchtigkeit muss mindestens so lange über dem Grenzwert liegen,
+        bevor eine Benachrichtigung ausgelöst wird. Das verhindert Meldungen
+        bei kurzen Messwertspitzen.
+      default:
+        minutes: 5
+      selector:
+        duration:
+
+    humidity_hysteresis:
+      name: Hysterese
+      description: >
+        Abstand unterhalb des Grenzwerts, ab dem die Luftfeuchtigkeit wieder
+        als normal gilt. Beispiel: Grenzwert 60 % und Hysterese 3 % bedeutet,
+        dass erst unter 57 % wieder Normalzustand erreicht wird.
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    opening_sensors:
+      name: Tür-/Fenstersensoren
+      description: >
+        Fenster- und Türkontakte des Raumes. Ist mindestens einer davon offen,
+        gilt der Raum als bereits gelüftet.
+      default: []
+      selector:
+        entity:
+          domain: binary_sensor
+          device_class:
+            - door
+            - window
+          multiple: true
+
+    notification_targets:
+      name: Benachrichtigungsziele
+      description: >
+        Notify-Entities, zum Beispiel Telegram, Alexa oder die Home Assistant
+        Mobile App.
+      selector:
+        entity:
+          domain: notify
+          multiple: true
+
+    room_name:
+      name: Raumname
+      description: Name des Raumes in der Benachrichtigung.
+      default: Raum
+      selector:
+        text:
+
+    notify_when_ventilating:
+      name: Beim Öffnen benachrichtigen
+      description: >
+        Benachrichtigt, dass bereits gelüftet wird, wenn ein Fenster oder eine
+        Tür geöffnet wird und die Luftfeuchtigkeit weiterhin hoch ist.
+      default: false
+      selector:
+        boolean:
+
+    notify_when_closing:
+      name: Nach dem Schließen erneut benachrichtigen
+      description: >
+        Wenn nach dem Schließen weiterhin zu hohe Luftfeuchtigkeit besteht,
+        wird erneut zum Lüften aufgefordert.
+      default: true
+      selector:
+        boolean:
+
+    notify_when_normal:
+      name: Entwarnung senden
+      description: >
+        Sendet eine Nachricht, sobald die Luftfeuchtigkeit unter den
+        Grenzwert minus Hysterese fällt.
+      default: false
+      selector:
+        boolean:
+
+mode: queued
+max: 10
+
+trigger:
+  - platform: numeric_state
+    entity_id: !input humidity_sensors
+    above: !input humidity_threshold
+    for: !input minimum_duration
+    id: humidity_high
+
+  - platform: numeric_state
+    entity_id: !input humidity_sensors
+    below: >-
+      {{ (humidity_threshold | float(0)) - (humidity_hysteresis | float(0)) }}
+    for: !input minimum_duration
+    id: humidity_normal
+
+  - platform: state
+    entity_id: !input opening_sensors
+    to: "on"
+    id: opening
+
+  - platform: state
+    entity_id: !input opening_sensors
+    to: "off"
+    id: closing
+
+variables:
+  humidity_sensors: !input humidity_sensors
+  opening_sensors: !input opening_sensors
+  humidity_threshold: !input humidity_threshold
+  humidity_hysteresis: !input humidity_hysteresis
+  room_name: !input room_name
+  notify_when_ventilating: !input notify_when_ventilating
+  notify_when_closing: !input notify_when_closing
+  notify_when_normal: !input notify_when_normal
+
+  humidity_values: >-
+    {% set values = namespace(items=[]) %}
+    {% for sensor in humidity_sensors %}
+      {% set value = states(sensor) | float(none) %}
+      {% if value is not none %}
+        {% set values.items = values.items + [value] %}
+      {% endif %}
+    {% endfor %}
+    {{ values.items }}
+
+  max_humidity: >-
+    {{ humidity_values | max | default(0) }}
+
+  anything_open: >-
+    {{ opening_sensors | select('is_state', 'on') | list | count > 0 }}
+
+condition: []
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: humidity_high
+          - condition: template
+            value_template: "{{ not anything_open }}"
+        sequence:
+          - action: notify.send_message
+            target:
+              entity_id: !input notification_targets
+            data:
+              title: "Lüften – {{ room_name }}"
+              message: >-
+                Im {{ room_name }} beträgt die Luftfeuchtigkeit aktuell
+                {{ max_humidity | round(0) }} %. Bitte lüften.
+
+      - conditions:
+          - condition: trigger
+            id: humidity_high
+          - condition: template
+            value_template: "{{ anything_open }}"
+          - condition: template
+            value_template: "{{ notify_when_ventilating }}"
+        sequence:
+          - action: notify.send_message
+            target:
+              entity_id: !input notification_targets
+            data:
+              title: "Lüften – {{ room_name }}"
+              message: >-
+                Im {{ room_name }} beträgt die Luftfeuchtigkeit aktuell
+                {{ max_humidity | round(0) }} %. Es wird bereits gelüftet.
+
+      - conditions:
+          - condition: trigger
+            id: opening
+          - condition: template
+            value_template: "{{ anything_open }}"
+          - condition: template
+            value_template: "{{ max_humidity > (humidity_threshold | float(0)) }}"
+          - condition: template
+            value_template: "{{ notify_when_ventilating }}"
+        sequence:
+          - action: notify.send_message
+            target:
+              entity_id: !input notification_targets
+            data:
+              title: "Lüften – {{ room_name }}"
+              message: >-
+                Im {{ room_name }} wird bereits gelüftet. Die Luftfeuchtigkeit
+                liegt bei {{ max_humidity | round(0) }} %.
+
+      - conditions:
+          - condition: trigger
+            id: closing
+          - condition: template
+            value_template: "{{ not anything_open }}"
+          - condition: template
+            value_template: "{{ max_humidity > (humidity_threshold | float(0)) }}"
+          - condition: template
+            value_template: "{{ notify_when_closing }}"
+        sequence:
+          - action: notify.send_message
+            target:
+              entity_id: !input notification_targets
+            data:
+              title: "Weiter lüften – {{ room_name }}"
+              message: >-
+                Im {{ room_name }} beträgt die Luftfeuchtigkeit weiterhin
+                {{ max_humidity | round(0) }} %. Bitte weiter lüften.
+
+      - conditions:
+          - condition: trigger
+            id: humidity_normal
+          - condition: template
+            value_template: "{{ not anything_open }}"
+          - condition: template
+            value_template: "{{ notify_when_normal }}"
+        sequence:
+          - action: notify.send_message
+            target:
+              entity_id: !input notification_targets
+            data:
+              title: "Luftfeuchtigkeit normal – {{ room_name }}"
+              message: >-
+                Die Luftfeuchtigkeit im {{ room_name }} ist wieder normal
+                ({{ max_humidity | round(0) }} %).
