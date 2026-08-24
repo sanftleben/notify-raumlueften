@@ -105,7 +105,7 @@ blueprint:
         wird erneut zum Lüften aufgefordert.
       default: true
       selector:
-        boolean:
+        boolean
 
     notify_when_normal:
       name: Entwarnung senden
@@ -114,7 +114,7 @@ blueprint:
         Grenzwert minus Hysterese fällt.
       default: false
       selector:
-        boolean:
+        boolean
 
 mode: queued
 max: 10
@@ -126,10 +126,18 @@ trigger:
     for: !input minimum_duration
     id: humidity_high
 
-  - platform: numeric_state
-    entity_id: !input humidity_sensors
-    below: >-
-      {{ (humidity_threshold | float(0)) - (humidity_hysteresis | float(0)) }}
+  # Numeric-state triggers require a literal float for `below`. Therefore the
+  # hysteresis threshold is evaluated with a template trigger instead.
+  - platform: template
+    value_template: >-
+      {% set values = namespace(items=[]) %}
+      {% for sensor in humidity_sensors %}
+        {% set value = states(sensor) | float(none) %}
+        {% if value is not none %}
+          {% set values.items = values.items + [value] %}
+        {% endif %}
+      {% endfor %}
+      {{ values.items | length > 0 and (values.items | max) < ((humidity_threshold | float(0)) - (humidity_hysteresis | float(0))) }}
     for: !input minimum_duration
     id: humidity_normal
 
