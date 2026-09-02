@@ -8,7 +8,9 @@ blueprint:
     Raumluft. Tür- und Fenstersensoren werden berücksichtigt: Ist bereits ein
     Fenster oder eine Tür geöffnet, wird keine zusätzliche Lüftungsempfehlung
     gesendet. Wird nach dem Lüften wieder geschlossen und die Luftfeuchtigkeit
-    ist weiterhin zu hoch, kann erneut benachrichtigt werden.
+    ist weiterhin zu hoch, kann erneut benachrichtigt werden. Benachrichtigungen
+    werden nur gesendet, wenn mindestens eine der ausgewählten Personen zuhause
+    ist.
   domain: automation
   author: sanftleben
 
@@ -151,6 +153,16 @@ blueprint:
             - window
           multiple: true
 
+    persons:
+      name: Personen
+      description: >
+        Mindestens eine dieser Personen muss zuhause sein, damit eine
+        Benachrichtigung gesendet wird.
+      selector:
+        entity:
+          domain: person
+          multiple: true
+
     notification_targets:
       name: Benachrichtigungsziele
       description: >
@@ -285,6 +297,7 @@ trigger:
 variables:
   humidity_sensors: !input humidity_sensors
   opening_sensors: !input opening_sensors
+  persons: !input persons
   humidity_threshold: !input humidity_threshold
   humidity_hysteresis: !input humidity_hysteresis
   outdoor_temperature_sensor: !input outdoor_temperature_sensor
@@ -329,6 +342,10 @@ variables:
   anything_open: >-
     {{ opening_sensors | select('is_state', 'on') | list | count > 0 }}
 
+  # True when at least one of the selected persons is home.
+  someone_home: >-
+    {{ persons | select('is_state', 'home') | list | count > 0 }}
+
 condition: []
 
 action:
@@ -338,6 +355,8 @@ action:
             id: ventilation_possible
           - condition: template
             value_template: "{{ not anything_open }}"
+          - condition: template
+            value_template: "{{ someone_home }}"
         sequence:
           - action: notify.send_message
             target:
@@ -355,6 +374,8 @@ action:
             value_template: "{{ anything_open }}"
           - condition: template
             value_template: "{{ notify_when_ventilating }}"
+          - condition: template
+            value_template: "{{ someone_home }}"
         sequence:
           - action: notify.send_message
             target:
@@ -374,6 +395,8 @@ action:
             value_template: "{{ max_humidity > (humidity_threshold | float(0)) }}"
           - condition: template
             value_template: "{{ notify_when_ventilating }}"
+          - condition: template
+            value_template: "{{ someone_home }}"
         sequence:
           - action: notify.send_message
             target:
@@ -395,6 +418,8 @@ action:
             value_template: "{{ ventilation_useful }}"
           - condition: template
             value_template: "{{ notify_when_closing }}"
+          - condition: template
+            value_template: "{{ someone_home }}"
         sequence:
           - action: notify.send_message
             target:
@@ -412,6 +437,8 @@ action:
             value_template: "{{ not anything_open }}"
           - condition: template
             value_template: "{{ notify_when_normal }}"
+          - condition: template
+            value_template: "{{ someone_home }}"
         sequence:
           - action: notify.send_message
             target:
